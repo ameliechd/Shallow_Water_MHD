@@ -16,7 +16,7 @@ import argparse
 logger = logging.getLogger(__name__)
 np.seterr(over='raise', divide='raise', invalid='raise')
 
-#Redoing this code but in 2D cartesian!!
+#Redoing this back to spherical!!
 
 #parsing to get input variables 
 parser = argparse.ArgumentParser()
@@ -32,8 +32,8 @@ hour = 3600* second
 day = 24*hour
 
 # Params
-Nx =  256 
-Ny = 255 
+Nphi =  512 
+Ntheta = 256 
 dealias = 3/2 # controls the grid mapping, predetermined already derived
 
 #global variables
@@ -60,12 +60,9 @@ stop_sim_time = 600*day #wall
 dtype = np.float64
 
 # Bases 
-coords = d3.CartesianCoordinates('x', 'y')
-x_basis = d3.RealFourier(coords['x'], size =Nx, bounds =(-np.pi *a, np.pi*a), dealias= dealias) #periodic i x
-y_basis = d3.Chebyshev(coords['y'], size =Ny, bounds = (-np.pi/2 * a, np.pi/ 2 *a), dealias= dealias) #bounded in y
+coords = d3.S2Coordinates('phi', 'theta')
 dist = d3.Distributor(coords, dtype=dtype)
-basis = (x_basis, y_basis)
-ex, ey = coords.unit_vector_fields(dist)
+basis = d3.SphereBasis(coords, (Nphi, Ntheta), radius=a, dealias=dealias, dtype=dtype)
 
 # Fields (variables!)
 u = dist.VectorField(coords, name='u', bases=basis)
@@ -74,89 +71,42 @@ heq = dist.Field(name = 'heq', bases = basis)
 Q = dist.Field(name='Q', bases=basis)
 R = dist.VectorField(coords, name='R', bases=basis) 
 A = dist.Field(name ='A', bases=basis)
+B = dist.VectorField(coords, name ='B', bases=basis)
 D_nu = dist.VectorField(coords, name ='D_nu', bases=basis)
 D_eta = dist.Field(name='D_eta', bases=basis)
 
 # Substitutions 
-zcross = lambda A: d3.skew(A) #z cross A
+zcross = lambda A: d3.MulCosine(d3.skew(A))
 grad = lambda f: d3.grad(f)
-lap  = lambda f: d3.Laplacian(f)
-grad_perp = lambda f: zcross(d3.grad(f))
-dy = lambda A: d3.Differentiate(A, coords['y'])
-
-
-# tau terms for 1st-order reduction
-horiz_bases = (x_basis) # the base that is not Chebyshev, this case your xbasis only
-"""
-For every derivative (on the Chebyshev basis, y) of a field (vector or scalar)
-you will need a corresponding tau term.
-i.e is you see grad(u), you need a tau_u1, and you see lap(u), which is 2nd derivative,
-    you will need another tau_u2
-So, any field A with dy(A) != 0, you will need the tau terms (in this case, A, u, and h)
-"""
-tau_u1 = dist.VectorField(coords, name='tau_u1', bases=horiz_bases)
-tau_u2 = dist.VectorField(coords, name='tau_u2', bases=horiz_bases)
-tau_A1 = dist.Field(name='tau_A1', bases=horiz_bases)
-tau_A2 = dist.Field(name='tau_A2', bases=horiz_bases)
-tau_h1 = dist.Field(name='tau_h1', bases=horiz_bases)
-tau_h2 = dist.Field(name='tau_h2', bases=horiz_bases)
-"""
-For any field A, and unit vector on Chebyshev basis (ey here)
-you replace 
-grad(A) --> grad(A) + ey*dy(tau_A1)
-lap(A)  --> lap(A) + ey*dy^2(tau_A1) - ey*dy(tau_A2) = div(grad_A) - dy(tau_A2)
-"""
-lift_basis = y_basis.derivative_basis(1)
-lift = lambda A, n: d3.Lift(A, lift_basis, n)
-Grad_u = d3.grad(u) + ey*lift(tau_u1, -1)
-Grad_A = d3.grad(A) + ey*lift(tau_A1, -1)
-Grad_h = d3.grad(h) + ey*lift(tau_h1, -1) 
-Div_u  = d3.trace(Grad_u)
-Lap2_u = d3.Laplacian(d3.div(Grad_u)) - lift(tau_u2, -1)
-Lap2_h = d3.Laplacian(d3.div(Grad_h)) - lift(tau_h2, -1)
-Div_hu = Grad_h @ u + h * d3.div(u)
-Lap_A  = d3.div(Grad_A) - lift(tau_A2, -1)
 
 # Initial conditions: zero velocity and h
-x, y = dist.local_grids(x_basis, y_basis)
+phi, theta = dist.local_grids(basis)
+lat = np.pi / 2 - theta + 0*phi
 u['g'][0][:] = 0 #no velocity initially in both dimensions
 u['g'][1][:] = 0 
 h['g'][:] = 0
+y = a* np.sin(theta)
 A['g'][:] = -np.exp(1/2)*H*V_A*Lm*np.exp(-y**2/(2*Lm**2))#background vector potential (should turn on once steady state is reached)
+#B = (1/(h+H)) * (-zcross(grad(A))) #because curl(A zhat) = -zhat cross gradA MIGHT HAVE TO CHANGE TO REMOVE MulCosine
+#B['g'][:] = (1/(h+H)) * (-zcross(grad(-np.exp(1/2)*H*V_A*Lm*np.exp(-y**2/(2*Lm**2)))))
 
 # distribution for heq
-lat_mask = (y/a>= -np.pi/2) & (y/a<= np.pi/2) #not nec
-day_mask = (((x/a >= 0) & (x/a <= np.pi/2)) | ((x/a >= 3*np.pi/2) & (x/a <= 2*np.pi))) & lat_mask
-heq['g'][:] = np.where(day_mask, H+delta_heq*np.cos(x/a)*np.cos(y/a), H)
+lat_mask = (lat>= -np.pi/2) & (lat<= np.pi/2) #not nec
+day_mask = (((phi >= 0) & (phi <= np.pi/2)) | ((phi >= 3*np.pi/2) & (phi <= 2*np.pi))) & lat_mask
+heq['g'][:] = np.where(day_mask, H+delta_heq*np.cos(phi)*np.cos(lat), H)
 
 #DEFINING heating, advective term, vicous diffusion and magnetic diffusion
 Q = (heq-h-H)/tau_rad
 R= -u*(Q+abs(Q))/2/(h+H)
 #D_nu = ... ignore for now
-B = (1/(h+H)) * (-zcross(grad(A))) #because curl(A zhat) = -zhat cross gradA
 
 # Problem 
-problem = d3.IVP([u,h,A, tau_u1, tau_u2, tau_A1, tau_A2, tau_h1, tau_h2], namespace = locals()) #
+problem = d3.IVP([u,h,A, B], namespace = locals()) 
+problem.add_equation("B = (1/(h + H)) * (-zcross(grad(A)))")
+problem.add_equation("dt(u) + nu*lap(lap(u)) + g*grad(h) + 2*Omega*zcross(u) = -u@grad(u) + B@grad(B) + R - u/tau_drag") 
+problem.add_equation("dt(h) + H*div(u) + nu*lap(lap(h)) = -div(h*u) + Q") 
+problem.add_equation("dt(A) - eta_par*(lap(A))= eta_par*(-(1/(h+H))*grad(h)@grad(A)) -u@grad(A)") #indcution equation with Dmu explicitly
 
-# #equations to solve 
-# problem.add_equation("dt(u) + nu*lap(lap(u)) + g*grad(h) + 2*Omega*zcross(u) = -u@grad(u) + B@grad(B) + R - u/tau_drag") 
-# problem.add_equation("dt(h) + H*div(u) + nu*lap(lap(h)) = -div(h*u) + Q") 
-# problem.add_equation("dt(A) - eta_par*(lap(A))= eta_par*(-(1/(h+H))*grad(h)@grad(A)) -u@grad(A)") #added induction equation
-
-problem.add_equation("dt(u) + nu*Lap2_u + g*Grad_h + 2*Omega*zcross(u) = -u@grad(u) + B@grad(B) + R - u/tau_drag") 
-problem.add_equation("dt(h) + H*Div_u + nu*Lap2_h = -Div_hu + Q") 
-problem.add_equation("dt(A) - eta_par*(Lap_A) = eta_par*(-(1/(h+H))*grad(h)@grad(A)) -u@grad(A)") 
-
-# boundary conditions
-problem.add_equation("ey@(u(y = np.pi/2*a)) = 0")
-problem.add_equation("ey@(u(y = - np.pi/2*a)) = 0")
-
-problem.add_equation("-ex@(grad_perp(u)(y = np.pi/2*a)) = 0") #taking d(u_1)/dy
-problem.add_equation("-ex@(grad_perp(u)(y = - np.pi*a)) = 0")
-# problem.add_equation("ex@(dy(u)(y = np.pi/2*a)) = 0") #taking d(u_1)/dy
-# problem.add_equation("ex@(dy(u)(y = - np.pi*a)) = 0")
-problem.add_equation("ex@(grad(A)(y = np.pi/2*a)) = 0")
-problem.add_equation("ex@(grad(A)(y = - np.pi/2*a)) = 0")
 
 # Solver 
 solver = problem.build_solver(d3.RK222) #Runge kutta 
@@ -201,9 +151,9 @@ CFL.add_velocity(u)
 
 #Flow properties, use to look at velocity 
 flow = d3.GlobalFlowProperty(solver, cadence=10)
-ex = dist.VectorField(coords, bases=basis)
-ex['g'][0] = 1  # x-direction
-flow.add_property((u@ex)**2, name = 'u_x')
+ephi = dist.VectorField(coords, bases=basis)
+ephi['g'][0] = 1  # phi-direction
+flow.add_property((u@ephi)**2, name = 'u_phi')
 
 #variables to automatically stop running the loop when steady state is achieved
 tol = 1e-16 #tolerance, can change 
